@@ -26,6 +26,7 @@ func (t *Token) Value() db.Value {
   return *t.DB.Value()
 }
 
+// 退出登录时，应该调用此接口删除token数据，可重复多次调用
 func (t *Token) Del() {
   t.DB.Del()
 }
@@ -73,7 +74,7 @@ func NewOrUseOld(ctx context.Context, value db.Value) *Token {
   return &Token{DB: d}
 }
 
-func ResumeFrom(ctx context.Context, token string) *Token {
+func Resume(ctx context.Context, token string) *Token {
   return &Token{DB: db.New(ctx, token)}
 }
 
