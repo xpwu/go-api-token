@@ -52,6 +52,7 @@ func (a *PostJsonAPI) SetUp(ctx context.Context, r *api.Request, apiReq interfac
   }
 
   tk := rData.Token
+  uid, ok := "", false
 
   if tk == "" {
     logger.Error("request has no 'token'")
@@ -59,12 +60,13 @@ func (a *PostJsonAPI) SetUp(ctx context.Context, r *api.Request, apiReq interfac
   }
 
   a.Token = token.Resume(ctx, tk)
-  if !a.Token.IsValid() {
+  uid, ok = a.Token.UidOrInvalid()
+  if !ok {
     logger.Error(fmt.Sprintf("token(%s) error or expire", tk))
     goto _401
   }
 
-  logger.PushPrefix("uid=" + a.Token.Uid())
+  logger.PushPrefix("uid=" + uid)
   a.UidContext = ctx
   a.Request = r
 

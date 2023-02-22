@@ -1,47 +1,34 @@
 package db
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"github.com/go-redis/redis"
-	"github.com/xpwu/go-db-redis/rediscache"
-	"github.com/xpwu/go-log/log"
-	"sort"
-	"time"
+  "context"
+  "fmt"
+  "github.com/go-redis/redis"
+  "github.com/xpwu/go-db-redis/rediscache"
+  "github.com/xpwu/go-log/log"
+  "sort"
+  "time"
 )
 
 const (
-	tokenK = "token:"
-	uidK   = "uid:"
+  tokenK = "token:"
+  uidK   = "uid:"
 )
 
 func uidKey(uid string) string {
-	return uidK + uid
+  return uidK + uid
 }
 
-func keyToUid(uidKey string) string {
-	return uidKey[len(uidK):]
-}
-
-//func cidField(cid string) string {
-//	return tokenK + cid
-//}
-
-func tokenKey(tid string) string {
-	return tokenK + tid
-}
-
-func keyToToken(tokenKey string) string {
-	return tokenKey[len(tokenK):]
+func tokenKey(token string) string {
+  return tokenK + token
 }
 
 type DB struct {
-	token  string
-	value  *Value
-	db     *redis.Client
-	ctx    context.Context
-	maxTTL time.Duration
+  token  string
+  value  *Value
+  client *redis.Client
+  ctx    context.Context
+  maxTTL time.Duration
 }
 
 /**
@@ -54,320 +41,412 @@ type DB struct {
  *
  * uidKey = 'uid:' + uid
  *
- * uidKey ---> {ClientId-1:token-1, ClientId-2:token-2, ...}
+ * uidKey ---> {ClientId_1:token_1, ClientId_2:token_2, ...}
+ *
+ * 以 tokenKey 作为判断的标准，写的时候后写，删的时候先删
  *
  */
 
-func New(ctx context.Context, token string) *DB {
-	ctx, logger := log.WithCtx(ctx)
-	logger.PushPrefix("token db")
+func New(ctx context.Context, suggestedToken string) *DB {
+  ctx, logger := log.WithCtx(ctx)
+  logger.PushPrefix("token db")
 
-	ret := &DB{
-		ctx:    ctx,
-		token:  token,
-		db:     rediscache.Get(confValue.redis),
-		maxTTL: time.Duration(confValue.maxTTL) * 24 * time.Hour,
-	}
-	//if _, err := ret.db.Ping().Result(); err != nil {
-	//  panic(err)
-	//}
+  // adjust
+  if confValue.allowDevices.min >= confValue.allowDevices.max {
+    confValue.allowDevices.max = 2 * confValue.allowDevices.min
+  }
 
-	return ret
+  ret := &DB{
+    ctx:    ctx,
+    token:  suggestedToken,
+    client: rediscache.Get(confValue.redis),
+    maxTTL: time.Duration(confValue.maxTTL) * 24 * time.Hour,
+  }
+  //if _, err := ret.db.Ping().Result(); err != nil {
+  //  panic(err)
+  //}
+
+  return ret
 }
 
-func (c *DB) Token() string {
-	return c.token
+func (db *DB) RealToken() string {
+  return db.token
 }
 
-func (c *DB) tokenKey() string {
-	return tokenKey(c.token)
+func (db *DB) tokenKey() string {
+  return tokenKey(db.token)
 }
 
-func (c *DB) IsValidToken() bool {
-	return c.exist(c.tokenKey())
+func must(logger *log.Logger, err error) {
+  if err != nil && err != redis.Nil {
+    logger.Error(err)
+    panic(err)
+  }
 }
 
-func (c *DB) RefreshTTL(ttl time.Duration) {
-	if ttl < 0 || ttl > c.maxTTL {
-		ttl = c.maxTTL
-	}
+func (db *DB) RefreshTTLto(ttl time.Duration) {
+  if ttl < 0 || ttl > db.maxTTL {
+    ttl = db.maxTTL
+  }
 
-	_, logger := log.WithCtx(c.ctx)
-	_, err := c.db.Expire(c.tokenKey(), ttl).Result()
-	if err != nil {
-		logger.Error(err)
-		panic(err)
-	}
+  _, logger := log.WithCtx(db.ctx)
+  _, err := db.client.Expire(db.tokenKey(), ttl).Result()
+  must(logger, err)
 }
 
-func (c *DB) OverWrite(value *Value) {
-	_, logger := log.WithCtx(c.ctx)
-	c.value = value
-	logger.Info(fmt.Sprintf("[uid(%s), clientid(%s)]=>token(%s)", value.Uid,
-		value.ClientId, c.Token()))
+func (db *DB) RefreshTTL() {
+  db.RefreshTTLto(db.maxTTL)
+}
 
-	old, err := c.db.HGet(value.uidKey(), value.ClientId).Result()
+func (db *DB) RefreshTTLAndLastTime(lastTime time.Time) {
+  _, logger := log.WithCtx(db.ctx)
 
-	if err != nil && err != redis.Nil {
-		panic(err)
-	}
+  _, err := db.client.Pipelined(func(pipeliner redis.Pipeliner) error {
+    tokenKey := db.tokenKey()
+    pipeliner.Expire(tokenKey, db.maxTTL)
+    pipeliner.HSet(tokenKey, vLatestTime, lastTime)
+    return nil
+  })
+  must(logger, err)
+}
 
-	//c.db.Watch()
-	// 先删除旧的
-	if err != redis.Nil {
-		c.db.Del(old)
-		c.db.HDel(value.uidKey(), value.ClientId)
-	}
+func (db *DB) Uid() (uid string, ok bool) {
+  _, logger := log.WithCtx(db.ctx)
+  uid, err := db.client.HGet(db.tokenKey(), vUid).Result()
+  must(logger, err)
+  if err == nil {
+    return uid, true
+  }
 
-	// 再淘汰
-	c.eviction(value.uidKey())
+  // err == redis.Nil
+  logger.Warning(fmt.Sprintf("have no token(%s) or the uid not exist", db.token))
+  // 可能是一个没有uid的token，所以做一次清除操作
+  db.client.Del(db.tokenKey())
+  return "", false
+}
 
-	// 最后写入
-	if _, err = c.db.HSet(value.uidKey(), value.cidField(), c.tokenKey()).Result(); err != nil {
-		panic(err)
-	}
-	if _, err = c.db.HMSet(c.tokenKey(), value.toMap()).Result(); err != nil {
-		panic(err)
-	}
-	if _, err = c.db.Expire(c.tokenKey(), value.TTL).Result(); err != nil {
-		panic(err)
-	}
+func (db *DB) Session() string {
+  _, logger := log.WithCtx(db.ctx)
+  session, err := db.client.HGet(db.tokenKey(), vSession).Result()
+  must(logger, err)
+
+  // not exist, return ZeroValue
+  return session
+}
+
+func (db *DB) LastTime() time.Time {
+  _, logger := log.WithCtx(db.ctx)
+  lTime, err := db.client.HGet(db.tokenKey(), vLatestTime).Result()
+  must(logger, err)
+
+  // not exist, return ZeroValue
+  return decodeLastTime(lTime)
+}
+
+func (db *DB) OverWrite(value *Value) {
+  _, logger := log.WithCtx(db.ctx)
+  db.value = value
+  logger.Info(fmt.Sprintf("[uid(%s), clientid(%s)]=>token(%s)", value.Uid,
+    value.ClientId, db.token))
+
+  old, err := db.client.HGet(value.uidKey(), value.ClientId).Result()
+  must(logger, err)
+
+  pipeliner := db.client.Pipeline()
+
+  // 先删除旧的token
+  if err == redis.Nil {
+    pipeliner.Del(tokenKey(old))
+  }
+
+  // 然后写入新的
+  pipeliner.HSet(value.uidKey(), value.ClientId, db.token)
+  pipeliner.HMSet(db.tokenKey(), value.toMap())
+  // 如果失败了，在使用的时候做补偿
+  pipeliner.Expire(db.tokenKey(), db.maxTTL)
+
+  _, err = pipeliner.Exec()
+  must(logger, err)
+  _ = pipeliner.Close()
+
+  // 最后淘汰
+  if eviction(db.ctx, db.client, value.uidKey()) {
+    // 重试一次，如果失败，在获取数据等地方时，补偿
+    eviction(db.ctx, db.client, value.uidKey())
+  }
 }
 
 type intStringSortMap struct {
-	key   []string
-	value []time.Duration
+  key   []string
+  value []time.Time
 }
 
 func (m *intStringSortMap) Len() int {
-	return len(m.value)
+  return len(m.value)
 }
 
 func (m *intStringSortMap) Less(i, j int) bool {
-	return m.value[i] < m.value[j]
+  return m.value[i].Before(m.value[j])
 }
 
 func (m *intStringSortMap) Swap(i, j int) {
-	m.key[i], m.key[j] = m.key[j], m.key[i]
-	m.value[i], m.value[j] = m.value[j], m.value[i]
+  m.key[i], m.key[j] = m.key[j], m.key[i]
+  m.value[i], m.value[j] = m.value[j], m.value[i]
 }
 
-func (c *DB) eviction(uidKey string) {
-	l, err := c.db.HLen(uidKey).Result()
-	if err != nil {
-		panic(err)
-	}
+// todo 使用Lua脚本实现，优化效率
+func eviction(ctx context.Context, redisC *redis.Client, uidKey string) (needRetry bool) {
+  _, logger := log.WithCtx(ctx)
+  l, err := redisC.HLen(uidKey).Result()
+  must(logger, err)
 
-	// 大于20个时，做一次token扫描，看是否有无效token, 并强制淘汰最近过期的，剩余不超过10个
-	// 对于永久不过期的  一样做淘汰
-	if l < confValue.allowDevices.min {
-		return
-	}
+  // 大于 confValue.allowDevices.max 时，做一次token扫描，看是否有无效token, 并强制淘汰早期的token，
+  // 剩余不超过 confValue.allowDevices.max 个
 
-	nets, err := c.db.HGetAll(uidKey).Result()
-	if err != nil {
-		panic(err)
-	}
+  if l < confValue.allowDevices.max {
+    return
+  }
 
-	sortMap := intStringSortMap{key: make([]string, len(nets), len(nets)),
-		value: make([]time.Duration, len(nets), len(nets))}
+  err = redisC.Watch(func(tx *redis.Tx) error {
+    clients, err := redisC.HGetAll(uidKey).Result()
+    must(logger, err)
+    // 再次判读
+    l = int64(len(clients))
+    if l < confValue.allowDevices.max {
+      return nil
+    }
 
-	index := 0
-	for idenField, net := range nets {
-		sortMap.key[index] = idenField
-		d, err := c.db.TTL(net).Result()
-		if err != nil {
-			panic(err)
-		}
-		sortMap.value[index] = d
-		index++
-	}
+    sortMap := intStringSortMap{
+      key:   make([]string, len(clients)),
+      value: make([]time.Time, len(clients)),
+    }
 
-	sort.Sort(&sortMap)
+    index := 0
+    pipeliner := redisC.Pipeline()
+    for client, token := range clients {
+      sortMap.key[index] = client
+      pipeliner.HGet(tokenKey(token), vLatestTime)
+      index++
+    }
+    rets, err := pipeliner.Exec()
+    must(logger, err)
+    _ = pipeliner.Close()
+    for i, ret := range rets {
+      must(logger, ret.Err())
+      // 不存在
+      if ret.Err() == redis.Nil {
+        sortMap.value[i] = time.Time{}
+        continue
+      }
+      sortMap.value[i] = decodeLastTime(ret.(*redis.StringCmd).Val())
+    }
 
-	for _, field := range sortMap.key {
-		net, err := c.db.HGet(uidKey, field).Result()
-		if err != nil && err != redis.Nil {
-			panic(err)
-		}
+    sort.Sort(&sortMap)
 
-		c.db.Del(net)
-		c.db.HDel(uidKey, field)
-		l--
-		if l <= 10 {
-			break
-		}
-	}
+    // transaction
+    pipeliner = tx.Pipeline()
+    for _, client := range sortMap.key {
+      pipeliner.Del(clients[client])
+      pipeliner.HDel(uidKey, client)
+      l--
+      if l <= confValue.allowDevices.min {
+        break
+      }
+    }
+    _, err = pipeliner.Exec()
+
+    if err == redis.TxFailedErr {
+      needRetry = true
+      return nil
+    }
+    must(logger, err)
+    _ = pipeliner.Close()
+    return nil
+  }, uidKey)
+  must(logger, err)
+
+  return
 }
 
-func (c *DB) SetOrUseOld(value *Value) {
-	ownerKey := value.uidKey()
-	// 先淘汰
-	c.eviction(ownerKey)
+func (db *DB) SetOrUseOld(value *Value) {
+  _, logger := log.WithCtx(db.ctx)
+  ownerKey := value.uidKey()
+  // 先淘汰
+  if eviction(db.ctx, db.client, value.uidKey()) {
+    // 重试一次，如果失败，在获取数据等地方补偿
+    eviction(db.ctx, db.client, value.uidKey())
+  }
 
-	identifierField := value.cidField()
-	netKey := c.tokenKey()
-	// 必须使用nx 保证并发安全
-	if err := c.db.HSetNX(ownerKey, identifierField, netKey).Err(); err != nil {
-		panic(err)
-	}
+  // 必须使用nx 保证并发安全
+  newSet, err := db.client.HSetNX(ownerKey, value.ClientId, db.token).Result()
+  must(logger, err)
 
-	oldNetKey, err := c.db.HGet(ownerKey, identifierField).Result()
-	if err != nil && err != redis.Nil {
-		panic(err)
-	}
-	if err != redis.Nil && c.exist(oldNetKey) && oldNetKey != netKey {
-		// 有old 就使用old
-		c.tid = keyToToken(oldNetKey)
-		return
-	}
+  pipeliner := db.client.Pipeline()
+  if !newSet {
+    // 有旧值，使用旧值
+    oldToken, err := db.client.HGet(ownerKey, value.ClientId).Result()
+    must(logger, err)
+    db.token = oldToken
+    pipeliner.HSet(tokenKey(oldToken), vLatestTime, value.encodeLastTime())
+  } else {
+    pipeliner.HMSet(tokenKey(db.token), value.toMap())
+  }
+  pipeliner.Expire(tokenKey(db.token), db.maxTTL)
+  _, err = pipeliner.Exec()
+  must(logger, err)
+  _ = pipeliner.Close()
 
-	if value.TTL < 0 || value.TTL > 30*24*time.Hour {
-		value.TTL = 30 * 24 * time.Hour
-	}
-
-	c.value = value
-	c.logger.Info(fmt.Sprintf("[uid(%s), clientid(%s)]=>token(%s)", value.Uid,
-		value.ClientId, c.Tid()))
-
-	if _, err = c.db.HMSet(c.tokenKey(), value.toMap()).Result(); err != nil {
-		panic(err)
-	}
-	if _, err = c.db.Expire(c.tokenKey(), value.TTL).Result(); err != nil {
-		panic(err)
-	}
+  db.value = value
+  logger.Info(fmt.Sprintf("[uid(%s), clientid(%s)]=>token(%s)", value.Uid,
+    value.ClientId, db.token))
 }
 
-func (c *DB) exist(key string) bool {
-	ret, err := c.db.Exists(key).Result()
-	if err != nil {
-		panic(err)
-	}
+func (db *DB) IsValidToken() bool {
+  _, logger := log.WithCtx(db.ctx)
+  ret, err := db.client.Exists(db.tokenKey()).Result()
+  must(logger, err)
 
-	return ret == 1
+  return ret == 1
 }
 
-func (c *DB) read() {
-	if c.value != nil {
-		return
-	}
+func (db *DB) Value() (value *Value, ok bool) {
+  _, logger := log.WithCtx(db.ctx)
 
-	if !c.IsValidToken() {
-		panic(errors.New(fmt.Sprintf("token (%s) is not valid", c.tid)))
-	}
+  if db.value != nil {
+    return db.value, true
+  }
 
-	m, err := c.db.HGetAll(c.tokenKey()).Result()
-	if err != nil {
-		panic(err)
-	}
+  m, err := db.client.HGetAll(db.tokenKey()).Result()
+  must(logger, err)
+  if err == redis.Nil || len(m) == 0 {
+    return nil, false
+  }
 
-	c.value = fromMap(m)
+  db.value = fromMap(m)
+  return db.value, true
 }
 
-func (c *DB) Value() *Value {
-	c.read()
-	return c.value
+func (db *DB) TTL() (ttl time.Duration) {
+  _, logger := log.WithCtx(db.ctx)
+  ttl, err := db.client.TTL(db.tokenKey()).Result()
+  must(logger, err)
+
+  return
 }
 
-/**
-  返回真实的剩余时间
+// Del 可重复多次调用
+func (db *DB) Del() {
+  _, logger := log.WithCtx(db.ctx)
 
-  通过Value返回的是一开始设置的时间
-*/
-func (c *DB) ReadLeftTTL() (ttl time.Duration) {
-	ttl, err := c.db.TTL(c.tokenKey()).Result()
+  value, ok := db.Value()
+  if !ok {
+    return
+  }
 
-	if err != nil {
-		panic(err)
-	}
+  log.Info(fmt.Sprintf("del the token(%s) of uid(%s) for clientid(%s)",
+    db.token, value.Uid, value.ClientId))
 
-	return
-}
-
-func (c *DB) Del() {
-	defer func() {
-		if r := recover(); r != nil {
-			c.logger.Error(r)
-		}
-	}()
-
-	if !c.exist(c.tokenKey()) {
-		return
-	}
-
-	c.read()
-	c.db.Del(c.tokenKey())
-	c.db.HDel(c.value.uidKey(), c.value.cidField())
-	c.value = nil
-
+  db.value = nil
+  _, err := db.client.Pipelined(func(pipeliner redis.Pipeliner) error {
+    pipeliner.Del(db.tokenKey())
+    pipeliner.HDel(value.uidKey(), value.ClientId)
+    return nil
+  })
+  must(logger, err)
 }
 
 func DelClientIdForUid(ctx context.Context, uid string, clientId string) {
-	ctx, logger := log.WithCtx(ctx)
-	logger.PushPrefix("token db")
+  _, logger := log.WithCtx(ctx)
+  logger.PushPrefix("token db")
 
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Error(r)
-		}
-	}()
+  db := rediscache.Get(confValue.redis)
+  token, err := db.HGet(uidKey(uid), clientId).Result()
+  must(logger, err)
+  if err == redis.Nil {
+    log.Info(fmt.Sprintf("DelClientIdForUid: uid(%s) donot have token for clientid(%s)", uid, clientId))
+    return
+  }
 
-	db := rediscache.Get(confValue.Config)
-	token, err := db.HGet(uidKey(uid), cidField(clientId)).Result()
-	if err != nil {
-		panic(err)
-	}
+  log.Info(fmt.Sprintf("del the token(%s) of uid(%s) for clientid(%s)", token, uid, clientId))
 
-	db.Del(token)
-	db.HDel(uidKey(uid), cidField(clientId))
+  _, err = db.Pipelined(func(pipeliner redis.Pipeliner) error {
+    pipeliner.Del(tokenKey(token))
+    pipeliner.HDel(uidKey(uid), clientId)
+    return nil
+  })
+  must(logger, err)
 }
 
 func DelAllForUid(ctx context.Context, uid string) {
-	ctx, logger := log.WithCtx(ctx)
-	logger.PushPrefix("token db")
+  _, logger := log.WithCtx(ctx)
+  logger.PushPrefix("token db")
 
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Error(r)
-		}
-	}()
+  db := rediscache.Get(confValue.redis)
+  clients, err := db.HGetAll(uidKey(uid)).Result()
+  must(logger, err)
 
-	db := rediscache.Get(confValue.Config)
-	tokens, err := db.HGetAll(uidKey(uid)).Result()
-	if err != nil {
-		panic(err)
-	}
+  tokenKeys := make([]string, 0, len(clients))
+  for _, token := range clients {
+    tokenKeys = append(tokenKeys, tokenKey(token))
+  }
 
-	for _, t := range tokens {
-		db.Del(t)
-	}
+  log.Info(fmt.Sprintf("del all tokens of uid(%s)", uid))
 
-	db.Del(uidKey(uid))
+  _, err = db.Pipelined(func(pipeliner redis.Pipeliner) error {
+    pipeliner.Del(tokenKeys...)
+    pipeliner.Del(uidKey(uid))
+    return nil
+  })
+  must(logger, err)
 }
 
 func Find(ctx context.Context, uid string, clientId string) (db *DB, ok bool) {
-	ctx, logger := log.WithCtx(ctx)
-	logger.PushPrefix("token db")
+  ctx, logger := log.WithCtx(ctx)
+  logger.PushPrefix("token db")
 
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Error(r)
-			ok = false
-		}
-	}()
+  rdb := rediscache.Get(confValue.redis)
 
-	rdb := rediscache.Get(confValue.Config)
+  // 先淘汰，重试两次都失败，直接返回
+  if eviction(ctx, rdb, uidKey(uid)) && eviction(ctx, rdb, uidKey(uid)) {
+    logger.Error("Find: eviction twice error")
+    return nil, false
+  }
 
-	tKey, err := rdb.HGet(uidKey(uid), cidField(clientId)).Result()
-	if err != nil && err != redis.Nil {
-		panic(err)
-	}
+  token, err := rdb.HGet(uidKey(uid), clientId).Result()
+  must(logger, err)
 
-	if err == redis.Nil {
-		logger.Warning(fmt.Sprintf("Not Find tokenKey for %s(%s)", uid, clientId))
-		return nil, false
-	}
+  if err == redis.Nil {
+    logger.Warning(fmt.Sprintf("not find token of uid(%s) for clientId(%s)", uid, clientId))
+    return nil, false
+  }
 
-	return New(ctx, keyToToken(tKey)), true
+  return New(ctx, token), true
+}
 
+func FindAll(ctx context.Context, uid string) []*DB {
+  ctx, logger := log.WithCtx(ctx)
+  logger.PushPrefix("token db")
+
+  rdb := rediscache.Get(confValue.redis)
+
+  // 先淘汰，重试两次都失败，直接返回
+  if eviction(ctx, rdb, uidKey(uid)) && eviction(ctx, rdb, uidKey(uid)) {
+    logger.Error("FindAll: eviction twice error")
+    return []*DB{}
+  }
+
+  clients, err := rdb.HGetAll(uidKey(uid)).Result()
+  must(logger, err)
+
+  ret := make([]*DB, 0, len(clients))
+  if len(clients) == 0 {
+    logger.Warning(fmt.Sprintf("not find any token of uid(%s)", uid))
+    return ret
+  }
+
+  for _, token := range clients {
+    ret = append(ret, New(ctx, token))
+  }
+
+  return ret
 }

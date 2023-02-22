@@ -12,12 +12,13 @@ import (
 /**
   业务在写登录接口时，应该在suit中嵌入 PostJsonLoginAPI
   如果业务接口判断用户登录成功，需要调用 SucceedXXX 中的某一个接口，具体调用哪一个由业务实际情况而定
- */
+*/
 
 type PostJsonLoginAPI struct {
   success bool
   Token   *token.Token
   Request *api.Request
+  value   *db.Value
 }
 
 func (l *PostJsonLoginAPI) SetUp(ctx context.Context, r *api.Request, apiReq interface{}) bool {
@@ -44,16 +45,19 @@ func (l *PostJsonLoginAPI) SetUp(ctx context.Context, r *api.Request, apiReq int
 func (l *PostJsonLoginAPI) Succeed(token *token.Token) {
   l.success = true
   l.Token = token
+  l.value, _ = token.DB.Value()
 }
 
 func (l *PostJsonLoginAPI) SucceedAndOverWrite(ctx context.Context, value db.Value) {
   l.success = true
   l.Token = token.New(ctx, value)
+  l.value = &value
 }
 
 func (l *PostJsonLoginAPI) SucceedAndSetOrUseOld(ctx context.Context, value db.Value) {
   l.success = true
   l.Token = token.NewOrUseOld(ctx, value)
+  l.value = &value
 }
 
 func (l *PostJsonLoginAPI) TearDown(ctx context.Context, apiRes interface{}, res *api.Response) {
@@ -65,7 +69,7 @@ func (l *PostJsonLoginAPI) TearDown(ctx context.Context, apiRes interface{}, res
     Data:  apiRes,
   }
   if l.success {
-    rData.Uid = l.Token.Uid()
+    rData.Uid = l.value.Uid
     rData.Token = l.Token.Id()
   }
 

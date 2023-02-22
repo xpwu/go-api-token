@@ -11,7 +11,7 @@ type config struct {
 	allowDevices struct {
 		min int64
 		max int64
-	} `conf:"allowDevices, [min, max)"`
+	} `conf:"allowDevices, allow Device count, [min, max)"`
 }
 
 var confValue = &config{

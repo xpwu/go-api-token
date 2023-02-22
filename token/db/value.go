@@ -2,12 +2,14 @@ package db
 
 import (
 	"strconv"
+	"time"
 )
 
 type Value struct {
 	Uid        string
 	ClientId   string
-	LatestTime uint64   // unix: s
+	// 具体意义由使用方决定传入什么，比如最后通信、最后登录等
+	LatestTime time.Time
 	Session    string
 }
 
@@ -15,28 +17,43 @@ func (v *Value) uidKey() string {
 	return uidKey(v.Uid)
 }
 
+const (
+	vUid = "uid"
+	vClientId = "clientId"
+	vSession = "session"
+	vLatestTime = "latestTime"
+)
+
+func (v *Value) encodeLastTime() string {
+	return strconv.FormatInt(v.LatestTime.Unix(), 10)
+}
+
 func (v *Value) toMap() map[string]interface{} {
 	m := make(map[string]interface{})
 	// 都使用string 方便反序列化
-	m["uid"] = v.Uid
-	m["clientId"] = v.ClientId
-	m["session"] = v.Session
-	m["latestTime"] = strconv.FormatUint(v.LatestTime, 10)
+	m[vUid] = v.Uid
+	m[vClientId] = v.ClientId
+	m[vSession] = v.Session
+	m[vLatestTime] = v.encodeLastTime()
 
 	return m
 }
 
-func fromMap(m map[string]string) *Value {
-	v := Value{}
-	v.ClientId = m["clientId"]
-	v.Uid = m["uid"]
-	v.Session = m["session"]
-
-	t, err := strconv.ParseUint(m["latestTime"], 10, 64)
+func decodeLastTime(str string) time.Time {
+	t, err := strconv.ParseInt(str, 10, 64)
 	if err != nil {
 		t = 0
 	}
-	v.LatestTime = t
 
-	return &v
+	return time.Unix(t, 0)
+}
+
+func fromMap(m map[string]string) *Value {
+	v := &Value{}
+	v.ClientId = m[vClientId]
+	v.Uid = m[vUid]
+	v.Session = m[vSession]
+	v.LatestTime = decodeLastTime(m[vLatestTime])
+
+	return v
 }

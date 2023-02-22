@@ -5,38 +5,49 @@ import (
   "crypto/hmac"
   "crypto/sha1"
   "encoding/hex"
+  "fmt"
   "github.com/xpwu/go-api-token/token/db"
   "github.com/xpwu/go-reqid/reqid"
 )
 
 type Token struct {
-  DB *db.DB
+  DB  *db.DB
+  uid func()string
 }
 
-// 返回token的值，常用于传递给客户端
+// Id 返回token的值，常用于传递给客户端
 func (t *Token) Id() string {
-  return t.DB.Tid()
+  return t.DB.RealToken()
+}
+
+// UidOrInvalid
+// ok true: token is valid, false: invalid
+func (t *Token) UidOrInvalid() (uid string, ok bool) {
+  uid, ok = t.DB.Uid()
+  if ok {
+    t.uid = func() string {
+      return uid
+    }
+  }
+
+  return
+}
+
+func (t *Token) mustUid() string {
+  uid, ok := t.DB.Uid()
+  if !ok {
+    panic(fmt.Sprintf("token(%s) does not have uid", t.DB.RealToken()))
+  }
+  return uid
 }
 
 func (t *Token) Uid() string {
-  return t.DB.Value().Uid
+  return t.uid()
 }
 
-func (t *Token) Value() db.Value {
-  return *t.DB.Value()
-}
-
-// 退出登录时，应该调用此接口删除token数据，可重复多次调用
+// Del 退出登录时，应该调用此接口删除token数据，可重复多次调用
 func (t *Token) Del() {
   t.DB.Del()
-}
-
-func (t *Token)IsValid() bool {
-  if t.DB == nil {
-    return false
-  }
-
-  return t.DB.IsValidToken()
 }
 
 func New(ctx context.Context, value db.Value) *Token {
@@ -49,12 +60,14 @@ func New(ctx context.Context, value db.Value) *Token {
     panic("ClientId is empty")
   }
 
-  id := NewId(value.Uid, value.ClientId)
+  newToken := NewId(value.Uid, value.ClientId)
 
-  d := db.New(ctx, id)
+  d := db.New(ctx, newToken)
   d.OverWrite(&value)
 
-  return &Token{DB: d}
+  return &Token{DB: d, uid: func() string {
+    return value.Uid
+  }}
 }
 
 func NewOrUseOld(ctx context.Context, value db.Value) *Token {
@@ -66,25 +79,33 @@ func NewOrUseOld(ctx context.Context, value db.Value) *Token {
     panic("ClientId is empty")
   }
 
-  id := NewId(value.Uid, value.ClientId)
+  newToken := NewId(value.Uid, value.ClientId)
 
-  d := db.New(ctx, id)
+  d := db.New(ctx, newToken)
   d.SetOrUseOld(&value)
 
-  return &Token{DB: d}
+  return &Token{DB: d, uid: func() string {
+    return value.Uid
+  }}
 }
 
 func Resume(ctx context.Context, token string) *Token {
-  return &Token{DB: db.New(ctx, token)}
+  ret := &Token{DB: db.New(ctx, token)}
+  ret.uid = ret.mustUid
+  return ret
 }
 
-func ResumeFromUidClientId(ctx context.Context, uid, clientId string) *Token {
+func ResumeFromUidClientId(ctx context.Context, uid, clientId string) (token *Token, ok bool) {
   d, ok := db.Find(ctx, uid, clientId)
   if !ok {
-    return &Token{}
+    return nil, false
   }
 
-  return &Token{DB: d}
+  ret := &Token{DB: d}
+  ret.uid = func() string {
+    return uid
+  }
+  return ret, true
 }
 
 func NewId(uid, clientId string) string {
