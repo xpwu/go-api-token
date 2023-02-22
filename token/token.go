@@ -7,6 +7,7 @@ import (
   "encoding/hex"
   "fmt"
   "github.com/xpwu/go-api-token/token/db"
+  "github.com/xpwu/go-log/log"
   "github.com/xpwu/go-reqid/reqid"
 )
 
@@ -51,6 +52,8 @@ func (t *Token) Del() {
 }
 
 func New(ctx context.Context, value db.Value) *Token {
+  ctx, logger := log.WithCtx(ctx)
+  logger.Debug("new token start")
 
   if value.Uid == "" {
     panic("uid is empty")
@@ -65,12 +68,17 @@ func New(ctx context.Context, value db.Value) *Token {
   d := db.New(ctx, newToken)
   d.OverWrite(&value)
 
+  logger.Debug("new token end")
+
   return &Token{DB: d, uid: func() string {
     return value.Uid
   }}
 }
 
 func NewOrUseOld(ctx context.Context, value db.Value) *Token {
+  ctx, logger := log.WithCtx(ctx)
+  logger.Debug("new token start")
+
   if value.Uid == "" {
     panic("uid is empty")
   }
@@ -83,6 +91,8 @@ func NewOrUseOld(ctx context.Context, value db.Value) *Token {
 
   d := db.New(ctx, newToken)
   d.SetOrUseOld(&value)
+
+  logger.Debug("new token end")
 
   return &Token{DB: d, uid: func() string {
     return value.Uid
