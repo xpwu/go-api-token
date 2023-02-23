@@ -155,7 +155,7 @@ func (db *DB) OverWrite(value *Value) {
   pipeliner := db.client.Pipeline()
 
   // 先删除旧的token
-  if err == redis.Nil {
+  if err != redis.Nil {
     pipeliner.Del(tokenKey(old))
   }
 
@@ -246,7 +246,7 @@ func eviction(ctx context.Context, redisC *redis.Client, uidKey string) (needRet
     // transaction
     pipeliner = tx.Pipeline()
     for _, client := range sortMap.key {
-      pipeliner.Del(clients[client])
+      pipeliner.Del(tokenKey(clients[client]))
       pipeliner.HDel(uidKey, client)
       l--
       if l <= confValue.AllowDevices.Min {
