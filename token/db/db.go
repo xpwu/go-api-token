@@ -104,7 +104,7 @@ func (db *DB) RefreshTTLAndLastTime(lastTime time.Time) {
   _, err := db.client.Pipelined(func(pipeliner redis.Pipeliner) error {
     tokenKey := db.tokenKey()
     pipeliner.Expire(tokenKey, db.maxTTL)
-    pipeliner.HSet(tokenKey, vLatestTime, lastTime)
+    pipeliner.HSet(tokenKey, vLatestTime, encodeLastTime(lastTime))
     return nil
   })
   must(logger, err)
@@ -287,7 +287,7 @@ func (db *DB) SetOrUseOld(value *Value) {
     oldToken, err := db.client.HGet(ownerKey, value.ClientId).Result()
     must(logger, err)
     db.token = oldToken
-    pipeliner.HSet(tokenKey(oldToken), vLatestTime, value.encodeLastTime())
+    pipeliner.HSet(tokenKey(oldToken), vLatestTime, encodeLastTime(value.LatestTime))
   } else {
     pipeliner.HMSet(tokenKey(db.token), value.toMap())
   }

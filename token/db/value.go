@@ -24,8 +24,8 @@ const (
 	vLatestTime = "latestTime"
 )
 
-func (v *Value) encodeLastTime() string {
-	return strconv.FormatInt(v.LatestTime.Unix(), 10)
+func encodeLastTime(lastTime time.Time) string {
+	return strconv.FormatInt(lastTime.Unix(), 10)
 }
 
 func (v *Value) toMap() map[string]interface{} {
@@ -34,7 +34,7 @@ func (v *Value) toMap() map[string]interface{} {
 	m[vUid] = v.Uid
 	m[vClientId] = v.ClientId
 	m[vSession] = v.Session
-	m[vLatestTime] = v.encodeLastTime()
+	m[vLatestTime] = encodeLastTime(v.LatestTime)
 
 	return m
 }
