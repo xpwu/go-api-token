@@ -6,20 +6,20 @@ import (
 )
 
 type config struct {
-	redis        rediscache.Config
-	maxTTL       int64 `conf:"maxTTL, unit:day"`
-	allowDevices struct {
-		min int64
-		max int64
+	Redis        rediscache.Config
+	MaxTTL       int64 `conf:"maxTTL, unit:day"`
+	AllowDevices struct {
+		Min int64
+		Max int64
 	} `conf:"allowDevices, allow Device count, [min, max)"`
 }
 
 var confValue = &config{
-	maxTTL: 90,
-	allowDevices: struct {
-		min int64
-		max int64
-	}{min: 10, max: 20},
+	MaxTTL: 90,
+	AllowDevices: struct {
+		Min int64
+		Max int64
+	}{Min: 10, Max: 20},
 }
 
 func init() {

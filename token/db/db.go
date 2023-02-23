@@ -52,15 +52,15 @@ func New(ctx context.Context, suggestedToken string) *DB {
   logger.PushPrefix("token db")
 
   // adjust
-  if confValue.allowDevices.min >= confValue.allowDevices.max {
-    confValue.allowDevices.max = 2 * confValue.allowDevices.min
+  if confValue.AllowDevices.Min >= confValue.AllowDevices.Max {
+    confValue.AllowDevices.Max = 2 * confValue.AllowDevices.Min
   }
 
   ret := &DB{
     ctx:    ctx,
     token:  suggestedToken,
-    client: rediscache.Get(confValue.redis),
-    maxTTL: time.Duration(confValue.maxTTL) * 24 * time.Hour,
+    client: rediscache.Get(confValue.Redis),
+    maxTTL: time.Duration(confValue.MaxTTL) * 24 * time.Hour,
   }
   //if _, err := ret.db.Ping().Result(); err != nil {
   //  panic(err)
@@ -203,7 +203,7 @@ func eviction(ctx context.Context, redisC *redis.Client, uidKey string) (needRet
   // 大于 confValue.allowDevices.max 时，做一次token扫描，看是否有无效token, 并强制淘汰早期的token，
   // 剩余不超过 confValue.allowDevices.max 个
 
-  if l < confValue.allowDevices.max {
+  if l < confValue.AllowDevices.Max {
     return
   }
 
@@ -212,7 +212,7 @@ func eviction(ctx context.Context, redisC *redis.Client, uidKey string) (needRet
     must(logger, err)
     // 再次判读
     l = int64(len(clients))
-    if l < confValue.allowDevices.max {
+    if l < confValue.AllowDevices.Max {
       return nil
     }
 
@@ -249,7 +249,7 @@ func eviction(ctx context.Context, redisC *redis.Client, uidKey string) (needRet
       pipeliner.Del(clients[client])
       pipeliner.HDel(uidKey, client)
       l--
-      if l <= confValue.allowDevices.min {
+      if l <= confValue.AllowDevices.Min {
         break
       }
     }
@@ -359,7 +359,7 @@ func DelClientIdForUid(ctx context.Context, uid string, clientId string) {
   _, logger := log.WithCtx(ctx)
   logger.PushPrefix("token db")
 
-  db := rediscache.Get(confValue.redis)
+  db := rediscache.Get(confValue.Redis)
   token, err := db.HGet(uidKey(uid), clientId).Result()
   must(logger, err)
   if err == redis.Nil {
@@ -381,7 +381,7 @@ func DelAllForUid(ctx context.Context, uid string) {
   _, logger := log.WithCtx(ctx)
   logger.PushPrefix("token db")
 
-  db := rediscache.Get(confValue.redis)
+  db := rediscache.Get(confValue.Redis)
   clients, err := db.HGetAll(uidKey(uid)).Result()
   must(logger, err)
 
@@ -404,7 +404,7 @@ func Find(ctx context.Context, uid string, clientId string) (db *DB, ok bool) {
   ctx, logger := log.WithCtx(ctx)
   logger.PushPrefix("token db")
 
-  rdb := rediscache.Get(confValue.redis)
+  rdb := rediscache.Get(confValue.Redis)
 
   // 先淘汰，重试两次都失败，直接返回
   if eviction(ctx, rdb, uidKey(uid)) && eviction(ctx, rdb, uidKey(uid)) {
@@ -427,7 +427,7 @@ func FindAll(ctx context.Context, uid string) []*DB {
   ctx, logger := log.WithCtx(ctx)
   logger.PushPrefix("token db")
 
-  rdb := rediscache.Get(confValue.redis)
+  rdb := rediscache.Get(confValue.Redis)
 
   // 先淘汰，重试两次都失败，直接返回
   if eviction(ctx, rdb, uidKey(uid)) && eviction(ctx, rdb, uidKey(uid)) {
